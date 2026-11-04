@@ -44,3 +44,16 @@ All endpoints other than login require `Authorization: Bearer <token>`.
 ## Validation
 
 Run `php artisan test` and `npm run build` from the Laravel project directory.
+
+
+## UI and offline reliability updates
+
+- The interface uses a restrained **glassmorphism** treatment for the top navigation and small status controls only. Clinical data panels remain opaque for legibility and contrast.
+- Page and card motion is subtle and respects the user's reduced-motion preference.
+- Offline cache versioning is updated by the service worker; only the HTML shell and successful same-origin Vite build assets are cached. API responses are never cached by the service worker.
+- Sync retries compare a transaction fingerprint and only acknowledge transactions already marked as processed. Pending and failed transactions can be retried, and client entity IDs are checked before creating duplicate patient, encounter, or immunization rows.
+- The date used by the report form is calculated in the browser's local timezone.
+
+## Browser console troubleshooting
+
+Requests such as `/hybridaction/...` are not application routes in this repository. If those requests appear together with errors from a `chrome-extension://` URL, reproduce the issue in a private window with browser extensions disabled before changing Laravel routes. The service worker does not intercept `/api/` requests.
