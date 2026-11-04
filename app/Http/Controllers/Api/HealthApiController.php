@@ -178,19 +178,28 @@ class HealthApiController extends Controller
 
         foreach ($data['transactions'] as $transaction) {
             $clientEntityId = $transaction['client_entity_id'] ?? null;
+            $hashOptions = JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES;
             $hash = hash('sha256', json_encode([
                 'entity_type' => $transaction['entity_type'],
                 'client_entity_id' => $clientEntityId,
                 'operation' => $transaction['operation'],
                 'payload' => $transaction['payload'],
-            ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+            ], $hashOptions));
+
+            // Logs written by the first HIM release hashed only the payload.
+            // Continue accepting those hashes so an app update does not strand
+            // offline transactions already stored on a device or server.
+            $legacyHash = hash('sha256', json_encode($transaction['payload'], $hashOptions));
 
             $log = SyncLog::where('client_device_id', $data['client_device_id'])
                 ->where('client_transaction_id', $transaction['client_transaction_id'])
                 ->first();
 
+            $matchesCurrentHash = $log && hash_equals((string) $log->payload_hash, $hash);
+            $matchesLegacyHash = $log && hash_equals((string) $log->payload_hash, $legacyHash);
+
             // A transaction ID must never be reused for different content.
-            if ($log && ! hash_equals((string) $log->payload_hash, $hash)) {
+            if ($log && ! $matchesCurrentHash && ! $matchesLegacyHash) {
                 $results[] = [
                     'client_transaction_id' => $transaction['client_transaction_id'],
                     'status' => 'failed',
@@ -212,6 +221,10 @@ class HealthApiController extends Controller
             }
 
             try {
+                if ($log && $matchesLegacyHash) {
+                    $log->update(['payload_hash' => $hash]);
+                }
+
                 if (! $log) {
                     $log = SyncLog::create([
                         'user_id' => $request->user()->id,
@@ -239,7 +252,7 @@ class HealthApiController extends Controller
                         // Recover safely if the patient row was committed but the
                         // sync-log status update was interrupted.
                         $existingPatient = $clientEntityId
-                            ? Patient::where('patient_uuid', $clientEntityId)->first()
+                            ? Patient::withTrashed()->where('patient_uuid', $clientEntityId)->first()
                             : null;
 
                         if ($existingPatient) {
