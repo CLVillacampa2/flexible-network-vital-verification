@@ -10,3 +10,61 @@
 @media(max-width:800px){.sidebar{transform:translateX(-100%);transition:transform .22s;width:260px;box-shadow:10px 0 35px #0e2d2020}.sidebar-open{transform:translateX(0)}.mobile-scrim{display:block;position:fixed;inset:0;background:#0d211d72;border:0;z-index:29}.main-shell{margin-left:0}.menu-button{display:grid;place-items:center;border:0;background:none;color:#63736a;padding:5px;margin-left:-8px;margin-right:10px}.topbar{padding:0 18px}.breadcrumb{margin-right:auto}.page-content{padding:25px 18px}.footer{margin:0 18px}.metric-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.overview-grid{grid-template-columns:1fr}.login-page{grid-template-columns:1fr}.login-side{display:none}.login-form-area{min-height:100vh}.logout-mobile{display:grid;place-items:center;border:0;background:none;color:#7a8980}.login-chip{display:none}.staff-grid{grid-template-columns:1fr}.report-summary{gap:20px;flex-wrap:wrap}.report-filters{flex-wrap:wrap}.report-filters>.field{flex:1;min-width:140px}.immunization-filter{align-items:flex-start;flex-direction:column;gap:12px}.immunization-help{padding-bottom:0}}
 @media(max-width:540px){.page-heading{align-items:flex-start;flex-direction:column;margin-bottom:18px}.page-heading h1{font-size:24px}.date-chip{display:none}.page-heading>.primary-button,.page-heading>.secondary-button{align-self:stretch}.metric-grid{gap:8px}.metric-card{min-height:118px;padding:11px}.metric-value{font-size:21px}.metric-icon{margin-bottom:9px;width:29px;height:29px}.row-meta{display:none}.recent-panel,.quick-panel{padding:15px}.welcome-note{align-items:flex-start}.note-sparkle{display:none}.directory-toolbar{padding:12px}.result-count{white-space:nowrap}.form-grid{grid-template-columns:1fr}.field-span,.form-section-title,.modal-actions{grid-column:1}.modal{padding:16px}.modal-backdrop{padding:10px}.schedule-grid{grid-template-columns:1fr 1fr;gap:8px}.schedule-card{padding:10px}.vaccine-status{font-size:7px}.schedule-heading{align-items:flex-start;gap:10px}.schedule-heading .secondary-button{font-size:9px;padding:8px}.sync-stats{grid-template-columns:1fr}.sync-stats .metric-card{min-height:105px}.queue-row{flex-wrap:wrap}.queue-row time{width:100%;padding-left:39px}.connection-label{display:none}.report-summary{gap:15px}.report-summary>div{min-width:38%}.topbar{height:57px}.breadcrumb{font-size:10px}.top-actions{gap:5px}.status-pill{font-size:9px}.login-form-area{padding:25px}.login-copyright{padding-top:30px}}
 @media print{.sidebar,.topbar,.footer,.page-heading>.secondary-button,.report-filters,.toast{display:none!important}.main-shell{margin:0}.page-content{padding:0;max-width:none}.report-summary{border:1px solid #ccc;background:#fff}.panel{box-shadow:none;border:1px solid #ccc}.page-heading{margin-bottom:15px}.page-heading h1{font-size:20px}}
+
+
+/* Restrained glassmorphism: apply blur to navigation chrome, not clinical data. */
+.topbar {
+    background: rgba(255, 255, 255, 0.84);
+    -webkit-backdrop-filter: blur(16px) saturate(145%);
+    backdrop-filter: blur(16px) saturate(145%);
+    border-bottom-color: rgba(218, 231, 224, 0.82);
+}
+
+.status-pill,
+.login-chip,
+.date-chip {
+    border: 1px solid rgba(218, 231, 224, 0.9);
+    background: rgba(255, 255, 255, 0.72);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.85), 0 2px 8px rgba(23, 54, 42, 0.035);
+    -webkit-backdrop-filter: blur(12px);
+    backdrop-filter: blur(12px);
+    transition: transform 180ms ease, box-shadow 180ms ease, background 180ms ease;
+}
+
+.metric-card {
+    transition: transform 180ms ease, box-shadow 180ms ease;
+}
+
+@media (hover: hover) and (prefers-reduced-motion: no-preference) {
+    .status-pill:hover,
+    .login-chip:hover,
+    .date-chip:hover {
+        transform: translateY(-1px);
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9), 0 5px 14px rgba(23, 54, 42, 0.08);
+    }
+
+    .metric-card:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 10px 24px rgba(23, 54, 42, 0.07);
+    }
+
+    .page-content {
+        animation: him-page-enter 240ms ease-out both;
+    }
+}
+
+@keyframes him-page-enter {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .page-content,
+    .metric-card,
+    .status-pill,
+    .login-chip,
+    .date-chip {
+        animation: none !important;
+        transition: none !important;
+    }
+}
