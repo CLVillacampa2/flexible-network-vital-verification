@@ -48,7 +48,7 @@ Run `php artisan test` and `npm run build` from the Laravel project directory.
 
 ## UI and offline reliability updates
 
-- The interface uses a restrained **glassmorphism** treatment for the top navigation and small status controls only. Clinical data panels remain opaque for legibility and contrast.
+- The interface uses a consistent, restrained **glassmorphism** design across the sidebar, sticky top navigation, dashboard metric cards, content panels, schedule cards, status chips, and login form. Clinical text, table content, and form fields retain high-contrast surfaces for legibility.
 - Page and card motion is subtle and respects the user's reduced-motion preference.
 - Offline cache versioning is updated by the service worker; only the HTML shell and successful same-origin Vite build assets are cached. API responses are never cached by the service worker.
 - Sync retries compare a transaction fingerprint and only acknowledge transactions already marked as processed. Pending and failed transactions can be retried, and client entity IDs are checked before creating duplicate patient, encounter, or immunization rows.
