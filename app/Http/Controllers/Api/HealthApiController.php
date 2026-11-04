@@ -211,6 +211,8 @@ class HealthApiController extends Controller
                 continue;
             }
 
+            $log = null;
+
             try {
                 if (! $log) {
                     $log = SyncLog::create([
