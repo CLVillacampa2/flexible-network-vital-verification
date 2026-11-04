@@ -9,7 +9,13 @@ const api = axios.create({ baseURL: '/api/v1', headers: { Accept: 'application/j
 const db = new Dexie('him-offline');
 db.version(1).stores({ queue: '++id, client_transaction_id, created_at' });
 db.version(2).stores({ queue: '++id, client_transaction_id, created_at', patients: 'id, patient_number, philhealth_id', households: 'id, household_code', codes: 'id, code', schedules: 'id, vaccine_code', encounters: 'id, encountered_at', immunizations: 'id, patient_id, vaccine_schedule_id, administered_at' });
-const today = new Date().toISOString().slice(0, 10);
+const toLocalDateInput = (date = new Date()) => {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+const today = toLocalDateInput();
 const emptyPatient = { first_name: '', middle_name: '', last_name: '', suffix: '', date_of_birth: '', sex_at_birth: 'unknown', patient_number: '', philhealth_id: '', contact_number: '', email: '', guardian_name: '', guardian_relationship: '', guardian_contact_number: '', household_id: '', is_household_head: false };
 const nav = [
   { id: 'overview', label: 'Overview', icon: Home }, { id: 'patients', label: 'Patients', icon: Users },
@@ -39,7 +45,7 @@ function App() {
   const [mobileNav, setMobileNav] = useState(false);
 
   useEffect(() => {
-    document.title = 'Flexible Network for Vital Verification';
+    document.title = 'Flexible Network for Vital Health Verification';
   }, []);
   useEffect(() => {
     const onlineHandler = () => setOnline(true), offlineHandler = () => setOnline(false);
@@ -69,24 +75,72 @@ function App() {
   };
   const syncQueue = async () => {
     if (!online) { setToast('Connect to the internet before syncing.'); return; }
+
     const queued = await db.queue.orderBy('id').toArray();
     if (!queued.length) { setToast('Your offline queue is clear.'); return; }
+
+    let requestFailed = false;
+    let failedTransactions = 0;
+    let processedTransactions = 0;
+
     for (let offset = 0; offset < queued.length; offset += 100) {
       const batch = queued.slice(offset, offset + 100);
+
       try {
-        const { data } = await api.post('/sync', { client_device_id: localStorage.getItem('him_device_id') || (() => { const id = uuid(); localStorage.setItem('him_device_id', id); return id; })(), transactions: batch.map(({ client_transaction_id, client_entity_id, entity_type, operation, payload }) => ({ client_transaction_id, client_entity_id, entity_type, operation, payload })) });
-        const completed = data.results.filter((result) => ['processed', 'completed'].includes(result.status)).map((result) => result.client_transaction_id);
-        await db.queue.where('client_transaction_id').anyOf(completed).delete();
-      } catch (error) { setToast(error.response?.data?.message || 'Sync stopped. Items remain safely queued.'); break; }
+        const deviceId = localStorage.getItem('him_device_id') || (() => {
+          const id = uuid();
+          localStorage.setItem('him_device_id', id);
+          return id;
+        })();
+
+        const { data } = await api.post('/sync', {
+          client_device_id: deviceId,
+          transactions: batch.map(({ client_transaction_id, client_entity_id, entity_type, operation, payload }) => ({
+            client_transaction_id,
+            client_entity_id,
+            entity_type,
+            operation,
+            payload,
+          })),
+        });
+
+        if (!Array.isArray(data.results)) {
+          throw new Error('The server returned an unexpected synchronization response.');
+        }
+
+        const completed = data.results
+          .filter((result) => ['processed', 'completed'].includes(result.status))
+          .map((result) => result.client_transaction_id);
+
+        failedTransactions += data.results.filter((result) => result.status === 'failed').length;
+        processedTransactions += completed.length;
+
+        if (completed.length) {
+          await db.queue.where('client_transaction_id').anyOf(completed).delete();
+        }
+      } catch (error) {
+        requestFailed = true;
+        setToast(error.response?.data?.message || error.message || 'Sync stopped. Items remain safely queued.');
+        break;
+      }
     }
-    setQueueCount(await db.queue.count()); setToast('Sync finished. Review failed items in the queue.');
+
+    setQueueCount(await db.queue.count());
+
+    if (!requestFailed) {
+      if (failedTransactions > 0) {
+        setToast(`Synced ${processedTransactions} item(s). ${failedTransactions} item(s) need review and remain queued.`);
+      } else {
+        setToast(`Successfully synchronized ${processedTransactions} item(s).`);
+      }
+    }
   };
 
   if (!user) return <Login onLogin={login} />;
   const visibleNav = user.role === 'super_admin' ? [...nav, { id: 'staff', label: 'Staff accounts', icon: BriefcaseMedical }] : nav;
   return <div className="min-h-screen bg-[#f5f7f6] text-slate-800">
     <aside className={`sidebar ${mobileNav ? 'sidebar-open' : ''}`}>
-      <div className="brand"><div className="brand-mark"><HeartPulse size={22} /></div><div><strong>Flexible Network for Vital Verification </strong><small>Barangay Health Center</small></div><button className="mobile-close" onClick={() => setMobileNav(false)}><X size={18}/></button></div>
+      <div className="brand"><div className="brand-mark"><HeartPulse size={22} /></div><div><strong>Flexible Network for Vital Health Verification </strong><small>Barangay Health Center</small></div><button className="mobile-close" onClick={() => setMobileNav(false)}><X size={18}/></button></div>
       <div className="nav-caption">WORKSPACE</div>
       <nav>{visibleNav.map(({ id, label, icon: Icon }) => <button key={id} onClick={() => { setPage(id); setMobileNav(false); }} className={`nav-item ${page === id ? 'active' : ''}`}><Icon size={18}/><span>{label}</span>{id === 'sync' && queueCount > 0 && <span className="nav-count">{queueCount}</span>}</button>)}</nav>
       <div className="sidebar-bottom"><div className="privacy-card"><ShieldCheck size={18}/><div><b>Protected records</b><span>Encrypted connection</span></div></div><div className="user-mini"><div className="avatar">{user.name.slice(0,1)}</div><div className="user-mini-text"><b>{user.name}</b><span>{user.role.replace('_', ' ')}</span></div><button title="Log out" onClick={logout}><LogOut size={17}/></button></div></div>
@@ -112,7 +166,7 @@ function App() {
 function Login({ onLogin }) {
   const [email, setEmail] = useState(''), [password, setPassword] = useState(''), [busy, setBusy] = useState(false), [error, setError] = useState('');
   const submit = async (event) => { event.preventDefault(); setBusy(true); setError(''); try { await onLogin({ email, password, device_name: 'HIM clinic workstation' }); } catch { setError('We could not verify these credentials. Check your email and password.'); } finally { setBusy(false); } };
-  return <div className="login-page"><div className="login-side"><div className="login-brand"><div className="brand-mark"><HeartPulse size={24}/></div>Flexible Network for Vital Verification</div><div className="login-hero"><div className="eyebrow light"><span/>BARANGAY HEALTH CENTER</div><h1>Better records.<br/><em>Healthier</em> communities.</h1><p>A secure workspace for coordinated primary care, patient records, and childhood immunization.</p><div className="login-illustration"><div className="illustration-circle"><HeartPulse size={76}/></div><span className="float-tag tag-one"><Activity size={15}/> Community care</span><span className="float-tag tag-two"><ShieldCheck size={15}/> Private & secure</span></div></div><div className="login-side-footer">A healthier community starts here <span>✦</span></div></div><div className="login-form-area"><form className="login-form" onSubmit={submit}><div className="eyebrow"><span/> STAFF ACCESS</div><h2>Welcome back</h2><p>Sign in to access your health center workspace.</p><label>Email address<input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="name@bhc.gov.ph" autoComplete="username" required/></label><label>Password<input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Enter your password" autoComplete="current-password" required/></label>{error && <div className="error-box">{error}</div>}<button className="primary-button full" disabled={busy}>{busy ? 'Signing in…' : 'Sign in securely'}<ChevronDown size={17} className="arrow-up"/></button><div className="form-privacy"><ShieldCheck size={17}/>Your session is protected and access is role-based.</div></form><div className="login-copyright">© 2026 HIM Health Information System</div></div></div>;
+  return <div className="login-page"><div className="login-side"><div className="login-brand"><div className="brand-mark"><HeartPulse size={24}/></div>Flexible Network for Vital Health Verification</div><div className="login-hero"><div className="eyebrow light"><span/>BARANGAY HEALTH CENTER</div><h1>Better records.<br/><em>Healthier</em> communities.</h1><p>A secure workspace for coordinated primary care, patient records, and childhood immunization.</p><div className="login-illustration"><div className="illustration-circle"><HeartPulse size={76}/></div><span className="float-tag tag-one"><Activity size={15}/> Community care</span><span className="float-tag tag-two"><ShieldCheck size={15}/> Private & secure</span></div></div><div className="login-side-footer">A healthier community starts here <span>✦</span></div></div><div className="login-form-area"><form className="login-form" onSubmit={submit}><div className="eyebrow"><span/> STAFF ACCESS</div><h2>Welcome back</h2><p>Sign in to access your health center workspace.</p><label>Email address<input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="name@bhc.gov.ph" autoComplete="username" required/></label><label>Password<input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Enter your password" autoComplete="current-password" required/></label>{error && <div className="error-box">{error}</div>}<button className="primary-button full" disabled={busy}>{busy ? 'Signing in…' : 'Sign in securely'}<ChevronDown size={17} className="arrow-up"/></button><div className="form-privacy"><ShieldCheck size={17}/>Your session is protected and access is role-based.</div></form><div className="login-copyright">© 2026 HIM Health Information System</div></div></div>;
 }
 
 function PageHeading({ eyebrow, title, description, action }) { return <div className="page-heading"><div><div className="eyebrow"><span/>{eyebrow}</div><h1>{title}</h1><p>{description}</p></div>{action}</div>; }
