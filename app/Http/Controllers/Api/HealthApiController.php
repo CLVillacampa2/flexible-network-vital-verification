@@ -164,68 +164,234 @@ class HealthApiController extends Controller
 
     public function sync(Request $request)
     {
-        $data = $request->validate(['client_device_id' => ['required', 'string', 'max:100'], 'transactions' => ['required', 'array', 'min:1', 'max:100'], 'transactions.*.client_transaction_id' => ['required', 'uuid'], 'transactions.*.entity_type' => ['required', Rule::in(['patient', 'encounter', 'immunization'])], 'transactions.*.client_entity_id' => ['nullable', 'uuid'], 'transactions.*.operation' => ['required', Rule::in(['create'])], 'transactions.*.payload' => ['required', 'array']]);
+        $data = $request->validate([
+            'client_device_id' => ['required', 'string', 'max:100'],
+            'transactions' => ['required', 'array', 'min:1', 'max:100'],
+            'transactions.*.client_transaction_id' => ['required', 'uuid'],
+            'transactions.*.entity_type' => ['required', Rule::in(['patient', 'encounter', 'immunization'])],
+            'transactions.*.client_entity_id' => ['nullable', 'uuid'],
+            'transactions.*.operation' => ['required', Rule::in(['create'])],
+            'transactions.*.payload' => ['required', 'array'],
+        ]);
+
         $results = [];
+
         foreach ($data['transactions'] as $transaction) {
-            $hash = hash('sha256', json_encode($transaction['payload'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
-            $existing = SyncLog::where('client_device_id', $data['client_device_id'])->where('client_transaction_id', $transaction['client_transaction_id'])->first();
-            if ($existing && $existing->status !== 'failed') {
-                $results[] = ['client_transaction_id' => $existing->client_transaction_id, 'status' => $existing->status, 'idempotent' => true, 'metadata' => $existing->result_metadata];
+            $clientEntityId = $transaction['client_entity_id'] ?? null;
+            $hash = hash('sha256', json_encode([
+                'entity_type' => $transaction['entity_type'],
+                'client_entity_id' => $clientEntityId,
+                'operation' => $transaction['operation'],
+                'payload' => $transaction['payload'],
+            ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+
+            $log = SyncLog::where('client_device_id', $data['client_device_id'])
+                ->where('client_transaction_id', $transaction['client_transaction_id'])
+                ->first();
+
+            // A transaction ID must never be reused for different content.
+            if ($log && ! hash_equals((string) $log->payload_hash, $hash)) {
+                $results[] = [
+                    'client_transaction_id' => $transaction['client_transaction_id'],
+                    'status' => 'failed',
+                    'message' => 'Transaction ID was previously used with different content.',
+                ];
                 continue;
             }
-            if ($existing && !hash_equals((string) $existing->payload_hash, $hash)) {
-                $results[] = ['client_transaction_id' => $existing->client_transaction_id, 'status' => 'failed', 'message' => 'Transaction ID was previously used with a different payload.'];
+
+            // Only a completed transaction is safe to acknowledge as a retry.
+            // Pending and failed rows must be allowed to run again.
+            if ($log && in_array($log->status, ['processed', 'completed'], true)) {
+                $results[] = [
+                    'client_transaction_id' => $log->client_transaction_id,
+                    'status' => $log->status,
+                    'idempotent' => true,
+                    'metadata' => $log->result_metadata,
+                ];
                 continue;
             }
-            $log = $existing ?? SyncLog::create(['user_id' => $request->user()->id, 'client_device_id' => $data['client_device_id'], 'client_transaction_id' => $transaction['client_transaction_id'], 'entity_type' => $transaction['entity_type'], 'client_entity_id' => $transaction['client_entity_id'] ?? null, 'operation' => $transaction['operation'], 'status' => 'pending', 'payload_hash' => $hash, 'received_at' => now()]);
-            if ($existing) { $log->update(['status' => 'pending', 'error_message' => null, 'processed_at' => null]); }
+
             try {
-                $metadata = DB::transaction(function () use ($transaction, $request) {
+                if (! $log) {
+                    $log = SyncLog::create([
+                        'user_id' => $request->user()->id,
+                        'client_device_id' => $data['client_device_id'],
+                        'client_transaction_id' => $transaction['client_transaction_id'],
+                        'entity_type' => $transaction['entity_type'],
+                        'client_entity_id' => $clientEntityId,
+                        'operation' => $transaction['operation'],
+                        'status' => 'pending',
+                        'payload_hash' => $hash,
+                        'received_at' => now(),
+                    ]);
+                } else {
+                    $log->update([
+                        'status' => 'pending',
+                        'error_message' => null,
+                        'processed_at' => null,
+                    ]);
+                }
+
+                $metadata = DB::transaction(function () use ($transaction, $request, $clientEntityId) {
                     $payload = $transaction['payload'];
+
                     if ($transaction['entity_type'] === 'patient') {
+                        // Recover safely if the patient row was committed but the
+                        // sync-log status update was interrupted.
+                        $existingPatient = $clientEntityId
+                            ? Patient::where('patient_uuid', $clientEntityId)->first()
+                            : null;
+
+                        if ($existingPatient) {
+                            return [
+                                'patient_id' => $existingPatient->id,
+                                'patient_number' => $existingPatient->patient_number,
+                            ];
+                        }
+
                         $validated = validator($payload, [
-                            'household_id' => ['nullable', 'exists:households,id'], 'patient_number' => ['required', 'string', 'max:40', 'unique:patients'],
-                            'first_name' => ['required', 'string', 'max:100'], 'middle_name' => ['nullable', 'string', 'max:100'], 'last_name' => ['required', 'string', 'max:100'], 'suffix' => ['nullable', 'string', 'max:20'],
-                            'date_of_birth' => ['required', 'date', 'before_or_equal:today'], 'sex_at_birth' => ['required', 'string', 'max:20'], 'contact_number' => ['nullable', 'string', 'max:30'], 'email' => ['nullable', 'email', 'max:150'],
-                            'guardian_name' => ['nullable', 'string', 'max:200'], 'guardian_relationship' => ['nullable', 'string', 'max:50'], 'guardian_contact_number' => ['nullable', 'string', 'max:30'], 'address_notes' => ['nullable', 'string'],
-                            'philhealth_id' => ['nullable', 'string', 'max:30', 'unique:patients'], 'is_household_head' => ['sometimes', 'boolean'],
+                            'household_id' => ['nullable', 'exists:households,id'],
+                            'patient_number' => ['required', 'string', 'max:40', 'unique:patients'],
+                            'first_name' => ['required', 'string', 'max:100'],
+                            'middle_name' => ['nullable', 'string', 'max:100'],
+                            'last_name' => ['required', 'string', 'max:100'],
+                            'suffix' => ['nullable', 'string', 'max:20'],
+                            'date_of_birth' => ['required', 'date', 'before_or_equal:today'],
+                            'sex_at_birth' => ['required', 'string', 'max:20'],
+                            'contact_number' => ['nullable', 'string', 'max:30'],
+                            'email' => ['nullable', 'email', 'max:150'],
+                            'guardian_name' => ['nullable', 'string', 'max:200'],
+                            'guardian_relationship' => ['nullable', 'string', 'max:50'],
+                            'guardian_contact_number' => ['nullable', 'string', 'max:30'],
+                            'address_notes' => ['nullable', 'string'],
+                            'philhealth_id' => ['nullable', 'string', 'max:30', 'unique:patients'],
+                            'is_household_head' => ['sometimes', 'boolean'],
                         ])->validate();
-                        $patient = Patient::create($validated + ['patient_uuid' => $transaction['client_entity_id'] ?? Str::uuid(), 'qr_code_token' => Str::uuid()]);
-                        return ['patient_id' => $patient->id, 'patient_number' => $patient->patient_number];
+
+                        $patient = Patient::create($validated + [
+                            'patient_uuid' => $clientEntityId ?? (string) Str::uuid(),
+                            'qr_code_token' => (string) Str::uuid(),
+                        ]);
+
+                        return [
+                            'patient_id' => $patient->id,
+                            'patient_number' => $patient->patient_number,
+                        ];
                     }
+
                     if ($transaction['entity_type'] === 'encounter') {
+                        $clientEncounterId = $clientEntityId
+                            ?? ($payload['client_encounter_id'] ?? (string) Str::uuid());
+
+                        $existingEncounter = ClinicalEncounter::where('client_encounter_id', $clientEncounterId)->first();
+
+                        if ($existingEncounter) {
+                            return ['encounter_id' => $existingEncounter->id];
+                        }
+
                         $validated = validator($payload, [
-                            'patient_id' => ['required', 'exists:patients,id'], 'encountered_at' => ['required', 'date'],
-                            'encounter_type' => ['sometimes', 'string', 'max:50'], 'chief_complaint' => ['nullable', 'string', 'max:500'], 'clinical_notes' => ['nullable', 'string'],
-                            'temperature_celsius' => ['nullable', 'numeric', 'between:20,50'], 'systolic_bp' => ['nullable', 'integer', 'between:0,400'], 'diastolic_bp' => ['nullable', 'integer', 'between:0,300'],
-                            'pulse_rate' => ['nullable', 'integer', 'between:0,400'], 'respiratory_rate' => ['nullable', 'integer', 'between:0,200'], 'oxygen_saturation' => ['nullable', 'numeric', 'between:0,100'],
-                            'weight_kg' => ['nullable', 'numeric', 'between:0,1000'], 'height_cm' => ['nullable', 'numeric', 'between:0,300'], 'follow_up_at' => ['nullable', 'date'],
-                            'diagnoses' => ['sometimes', 'array'], 'diagnoses.*.icd10_code_id' => ['required', 'integer', 'exists:icd10_codes,id'], 'diagnoses.*.is_primary' => ['sometimes', 'boolean'], 'diagnoses.*.diagnosis_notes' => ['nullable', 'string'],
+                            'patient_id' => ['required', 'exists:patients,id'],
+                            'encountered_at' => ['required', 'date'],
+                            'encounter_type' => ['sometimes', 'string', 'max:50'],
+                            'chief_complaint' => ['nullable', 'string', 'max:500'],
+                            'clinical_notes' => ['nullable', 'string'],
+                            'temperature_celsius' => ['nullable', 'numeric', 'between:20,50'],
+                            'systolic_bp' => ['nullable', 'integer', 'between:0,400'],
+                            'diastolic_bp' => ['nullable', 'integer', 'between:0,300'],
+                            'pulse_rate' => ['nullable', 'integer', 'between:0,400'],
+                            'respiratory_rate' => ['nullable', 'integer', 'between:0,200'],
+                            'oxygen_saturation' => ['nullable', 'numeric', 'between:0,100'],
+                            'weight_kg' => ['nullable', 'numeric', 'between:0,1000'],
+                            'height_cm' => ['nullable', 'numeric', 'between:0,300'],
+                            'follow_up_at' => ['nullable', 'date'],
+                            'diagnoses' => ['sometimes', 'array'],
+                            'diagnoses.*.icd10_code_id' => ['required', 'integer', 'exists:icd10_codes,id'],
+                            'diagnoses.*.is_primary' => ['sometimes', 'boolean'],
+                            'diagnoses.*.diagnosis_notes' => ['nullable', 'string'],
                         ])->validate();
+
                         $diagnoses = $validated['diagnoses'] ?? [];
                         if (count(array_filter($diagnoses, fn ($diagnosis) => $diagnosis['is_primary'] ?? false)) > 1) {
-                            throw \Illuminate\Validation\ValidationException::withMessages(['diagnoses' => 'Only one diagnosis may be primary.']);
+                            throw \Illuminate\Validation\ValidationException::withMessages([
+                                'diagnoses' => 'Only one diagnosis may be primary.',
+                            ]);
                         }
+
                         unset($validated['diagnoses']);
-                        $encounter = ClinicalEncounter::create($validated + ['client_encounter_id' => $transaction['client_entity_id'] ?? (string) Str::uuid(), 'attending_user_id' => $request->user()->id]);
-                        foreach ($diagnoses as $diagnosis) { $encounter->diagnoses()->create($diagnosis); }
+
+                        $encounter = ClinicalEncounter::create($validated + [
+                            'client_encounter_id' => $clientEncounterId,
+                            'attending_user_id' => $request->user()->id,
+                        ]);
+
+                        foreach ($diagnoses as $diagnosis) {
+                            $encounter->diagnoses()->create($diagnosis);
+                        }
+
                         return ['encounter_id' => $encounter->id];
                     }
+
+                    $clientRecordId = $clientEntityId
+                        ?? ($payload['client_record_id'] ?? (string) Str::uuid());
+
+                    $existingRecord = ImmunizationRecord::where('client_record_id', $clientRecordId)->first();
+
+                    if ($existingRecord) {
+                        return ['immunization_record_id' => $existingRecord->id];
+                    }
+
                     $validated = validator($payload, [
-                        'patient_id' => ['required', 'exists:patients,id'], 'vaccine_schedule_id' => ['required', 'exists:vaccine_schedules,id'], 'administered_at' => ['required', 'date'],
-                        'dose_label' => ['nullable', 'string', 'max:50'], 'lot_number' => ['nullable', 'string', 'max:100'], 'vaccine_expiry_date' => ['nullable', 'date'],
-                        'administration_site' => ['nullable', 'string', 'max:100'], 'notes' => ['nullable', 'string'],
+                        'patient_id' => ['required', 'exists:patients,id'],
+                        'vaccine_schedule_id' => ['required', 'exists:vaccine_schedules,id'],
+                        'administered_at' => ['required', 'date'],
+                        'dose_label' => ['nullable', 'string', 'max:50'],
+                        'lot_number' => ['nullable', 'string', 'max:100'],
+                        'vaccine_expiry_date' => ['nullable', 'date'],
+                        'administration_site' => ['nullable', 'string', 'max:100'],
+                        'notes' => ['nullable', 'string'],
                     ])->validate();
-                    $record = ImmunizationRecord::create($validated + ['client_record_id' => $transaction['client_entity_id'] ?? (string) Str::uuid(), 'administered_by' => $request->user()->id]);
+
+                    $record = ImmunizationRecord::create($validated + [
+                        'client_record_id' => $clientRecordId,
+                        'administered_by' => $request->user()->id,
+                    ]);
+
                     return ['immunization_record_id' => $record->id];
                 });
-                $log->update(['status' => 'processed', 'result_metadata' => $metadata, 'processed_at' => now()]);
-                $results[] = ['client_transaction_id' => $log->client_transaction_id, 'status' => 'processed', 'metadata' => $metadata];
+
+                $log->update([
+                    'status' => 'processed',
+                    'result_metadata' => $metadata,
+                    'error_message' => null,
+                    'processed_at' => now(),
+                ]);
+
+                $results[] = [
+                    'client_transaction_id' => $log->client_transaction_id,
+                    'status' => 'processed',
+                    'metadata' => $metadata,
+                ];
             } catch (Throwable $exception) {
-                $log->update(['status' => 'failed', 'error_message' => mb_substr($exception->getMessage(), 0, 5000), 'processed_at' => now()]);
-                $results[] = ['client_transaction_id' => $log->client_transaction_id, 'status' => 'failed', 'message' => 'Transaction failed validation or processing.'];
+                if ($log) {
+                    try {
+                        $log->update([
+                            'status' => 'failed',
+                            'error_message' => mb_substr($exception->getMessage(), 0, 5000),
+                            'processed_at' => now(),
+                        ]);
+                    } catch (Throwable) {
+                        // Keep the response useful even if logging fails.
+                    }
+                }
+
+                $results[] = [
+                    'client_transaction_id' => $transaction['client_transaction_id'],
+                    'status' => 'failed',
+                    'message' => 'Transaction failed validation or processing.',
+                ];
             }
         }
+
         return response()->json(['results' => $results]);
     }
 
